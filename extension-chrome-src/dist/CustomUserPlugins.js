@@ -76,6 +76,32 @@
         await withStore("readwrite", store => store.delete(id));
     }
 
+    function isStaleAccountSwitcherOverlay(plugin) {
+        const haystack = [
+            plugin?.name,
+            plugin?.source,
+            plugin?.url,
+            plugin?.filePath,
+            plugin?.code
+        ].filter(Boolean).join("\n").toLowerCase();
+
+        return haystack.includes("nybotic/accountswitcher")
+            || haystack.includes("index.tsx (compat build)")
+            || haystack.includes("vc-account-switcher-fab")
+            || haystack.includes("equicordaccountswitcher");
+    }
+
+    async function removeStaleAccountSwitcherOverlayEntries() {
+        const stale = plugins.filter(isStaleAccountSwitcherOverlay);
+        if (!stale.length) return;
+
+        for (const plugin of stale) {
+            await deletePlugin(plugin.id);
+        }
+        plugins = plugins.filter(plugin => !stale.some(item => item.id === plugin.id));
+        log(`Removed ${stale.length} stale AccountSwitcher overlay entr${stale.length === 1 ? "y" : "ies"}.`);
+    }
+
     function emit() {
         listeners.forEach(listener => {
             try {
@@ -933,6 +959,7 @@
 
     async function boot() {
         plugins = await readAllPlugins();
+        await removeStaleAccountSwitcherOverlayEntries();
         emit();
         for (const plugin of plugins) {
             if (plugin.enabled) await applyPlugin(plugin, { persist: true });
