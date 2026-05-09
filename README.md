@@ -7,7 +7,7 @@ This workspace contains a modified Equicord Web Chrome extension with a custom u
 1. Open Chrome extensions: `chrome://extensions`.
 2. Enable Developer mode.
 3. Choose "Load unpacked".
-4. Select `C:\Users\aaron\Documents\projects\EquicordProjects\EquicordWebUserPlugins\extension-chrome-src`.
+4. Select `C:\Users\aaron\Documents\projects\EquicordProjects\EquicordWebUserPlugins`.
 5. Open Discord in the browser.
 
 ## Use custom plugins
@@ -56,4 +56,3 @@ module.exports = {
     stop() {}
 };
 ```
-
