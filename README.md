@@ -12,12 +12,12 @@ This workspace contains a modified Equicord Web Chrome extension with a custom u
 
 ## Use custom plugins
 
-Open the manager with the `UP` button in the bottom-right of Discord, or press `Ctrl+Shift+U`.
+Open Equicord settings, then go to the Plugins tab. The Custom User Plugins panel is shown there.
 
 You can add plugins in either of these ways:
 
 - Paste a GitHub repo URL, `owner/repo`, raw GitHub `.js` URL, or direct `.js` URL.
-- Upload a local compiled `.js` or `.mjs` file.
+- Upload a local compiled `.js` / `.mjs` file, or upload a whole built plugin folder.
 
 For GitHub repositories, the loader checks for compiled JavaScript files in this order:
 
@@ -30,6 +30,8 @@ For GitHub repositories, the loader checks for compiled JavaScript files in this
 - `userplugin.js`
 
 TypeScript-only repos need to be built first, or uploaded as compiled JavaScript.
+
+Folder uploads are scanned for compiled JavaScript candidates like `dist/index.js`, `index.js`, `plugin.js`, and `userplugin.js`. If you select a folder containing multiple top-level plugin folders, each folder is scanned and installed separately when it contains a usable JavaScript plugin file.
 
 ## Plugin shape
 
