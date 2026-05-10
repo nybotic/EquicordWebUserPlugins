@@ -712,16 +712,14 @@
             const runner = new Function(
                 "module",
                 "exports",
-                "api",
+            "api",
             "Vencord",
             "VencordNative",
             "EquicordUserPlugins",
-            "definePlugin",
-            "registerPlugin",
             "__equpImport",
             `"use strict";\n${code}\n//# sourceURL=equicord-user-plugin-${plugin.id}.js`
         );
-            runner(module, exports, api, window.Vencord, window.VencordNative, window.EquicordUserPlugins, value => value, api.register, importResolver);
+            runner(module, exports, api, window.Vencord, window.VencordNative, window.EquicordUserPlugins, importResolver);
         } finally {
             if (previousGlobal) {
                 window.EquicordUserPlugins = previousGlobal;
