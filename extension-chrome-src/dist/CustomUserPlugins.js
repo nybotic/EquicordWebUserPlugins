@@ -604,6 +604,53 @@
         );
     }
 
+    function normalizePluginDefinition(definition, plugin) {
+        const normalized = typeof definition === "function" ? { name: plugin.name, start: definition } : definition;
+        if (!normalized || typeof normalized !== "object") {
+            throw new Error("Plugin did not export an object or call EquicordUserPlugins.register(...).");
+        }
+
+        normalized.name ||= plugin.name;
+        normalized.description ||= `Custom user plugin from ${plugin.source || plugin.filePath || "local upload"}.`;
+        normalized.tags ||= ["Utility"];
+        normalized.authors ||= [{ name: "Custom User Plugin", id: 0n }];
+        normalized.requiresRestart ??= false;
+        normalized.source ||= plugin.source || plugin.url || "";
+        normalized.__equicordUserPluginId = plugin.id;
+
+        if (normalized.settings && typeof normalized.settings === "object" && "pluginName" in normalized.settings) {
+            normalized.settings.pluginName = normalized.name;
+        }
+
+        return normalized;
+    }
+
+    function markPluginSettingsChanged(name, enabled) {
+        const settings = window.Vencord?.Settings?.plugins;
+        const plain = window.Vencord?.PlainSettings?.plugins;
+
+        if (settings) {
+            settings[name] ??= {};
+            settings[name].enabled = Boolean(enabled);
+        } else if (plain) {
+            plain[name] = { ...(plain[name] || {}), enabled: Boolean(enabled) };
+        }
+    }
+
+    function registerPluginDefinition(definition, plugin) {
+        const manager = getPluginManager();
+        if (!manager?.plugins) return false;
+
+        const previous = manager.plugins[definition.name];
+        if (previous && previous !== definition && previous.__equicordUserPluginId !== plugin.id) {
+            throw new Error(`A plugin named ${definition.name} is already registered.`);
+        }
+
+        manager.plugins[definition.name] = definition;
+        markPluginSettingsChanged(definition.name, plugin.enabled);
+        return true;
+    }
+
     function makeSandbox(plugin, registration) {
         const api = {
             Vencord: window.Vencord,
@@ -646,28 +693,13 @@
         }
     }
 
-    async function startPlugin(plugin) {
-        await stopRuntime(plugin.id);
-
+    async function evaluatePlugin(plugin, cleanup) {
         const registration = { definition: null };
-        const cleanup = [];
         const module = { exports: {} };
         const exports = module.exports;
         const api = makeSandbox(plugin, registration);
         const code = await transformSource(plugin.code || "", plugin.filePath || "");
         const importResolver = makeImportResolver();
-        const cssNodes = [];
-
-        for (const css of plugin.css || []) {
-            if (!css?.source?.trim()) continue;
-            const style = document.createElement("style");
-            style.dataset.equicordUserPlugin = plugin.id;
-            style.dataset.equicordUserPluginCss = css.path || "inline";
-            style.textContent = css.source;
-            document.head.append(style);
-            cssNodes.push(style);
-        }
-        cleanup.push(() => cssNodes.forEach(node => node.remove()));
 
         const previousGlobal = window.EquicordUserPlugins;
         window.EquicordUserPlugins = {
@@ -697,16 +729,31 @@
         }
 
         const definition = registration.definition || module.exports?.default || module.exports;
-        const normalized = typeof definition === "function" ? { name: plugin.name, start: definition } : definition;
-        if (!normalized || typeof normalized !== "object") {
-            throw new Error("Plugin did not export an object or call EquicordUserPlugins.register(...).");
+        return normalizePluginDefinition(definition, plugin);
+    }
+
+    async function startPlugin(plugin) {
+        await stopRuntime(plugin.id);
+
+        const cleanup = [];
+        const cssNodes = [];
+
+        for (const css of plugin.css || []) {
+            if (!css?.source?.trim()) continue;
+            const style = document.createElement("style");
+            style.dataset.equicordUserPlugin = plugin.id;
+            style.dataset.equicordUserPluginCss = css.path || "inline";
+            style.textContent = css.source;
+            document.head.append(style);
+            cssNodes.push(style);
         }
-        if (normalized.settings && typeof normalized.settings === "object" && "pluginName" in normalized.settings) {
-            normalized.settings.pluginName = normalized.name || plugin.name;
-        }
+        cleanup.push(() => cssNodes.forEach(node => node.remove()));
+
+        const normalized = await evaluatePlugin(plugin, cleanup);
+        registerPluginDefinition(normalized, plugin);
 
         const context = {
-            api,
+            api: makeSandbox(plugin, { definition: normalized }),
             Vencord: window.Vencord,
             VencordNative: window.VencordNative,
             plugin,
@@ -718,9 +765,7 @@
         let managerStop = null;
         if (shouldUsePluginManager(normalized)) {
             const manager = getPluginManager();
-            const settings = window.Vencord?.Settings?.plugins || window.Vencord?.PlainSettings?.plugins;
-            if (settings) settings[normalized.name] = { ...(settings[normalized.name] || {}), enabled: true };
-            manager.plugins[normalized.name] = normalized;
+            markPluginSettingsChanged(normalized.name, true);
             const result = manager.startPlugin(normalized);
             if (result === false) throw new Error(`Equicord PluginManager could not start ${normalized.name}.`);
             managerStop = () => manager.stopPlugin(normalized);
@@ -754,7 +799,12 @@
         let next = { ...plugin, error: null };
         try {
             if (next.enabled) await startPlugin(next);
-            else await stopRuntime(next.id);
+            else {
+                await stopRuntime(next.id);
+                const normalized = await evaluatePlugin(next, []);
+                registerPluginDefinition(normalized, next);
+                markPluginSettingsChanged(normalized.name, false);
+            }
             next.lastLoadedAt = next.enabled ? Date.now() : next.lastLoadedAt;
         } catch (error) {
             next.error = error?.message || String(error);
