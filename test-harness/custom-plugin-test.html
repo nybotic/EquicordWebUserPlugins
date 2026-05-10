@@ -129,6 +129,7 @@ window.Vencord = {
         }
     },
     Plugins: pluginManager,
+    PluginMeta: {},
     Settings: settingsProxy,
     PlainSettings: settingsPlain,
     Util: {}
@@ -150,6 +151,7 @@ window.addEventListener("unhandledrejection", event => log("unhandledrejection",
         customError: added.error,
         registered: Boolean(registered),
         registeredName: registered?.name,
+        pluginMeta: window.Vencord.PluginMeta.AccountSwitcher,
         settingsEnabled: window.Vencord.PlainSettings.plugins.AccountSwitcher?.enabled,
         started: registered?.startedByHarness === true,
         hasUserAreaButton: Boolean(registered?.userAreaButton)

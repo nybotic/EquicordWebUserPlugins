@@ -637,9 +637,23 @@
         }
     }
 
+    function registerPluginMeta(definition, plugin) {
+        const meta = window.Vencord?.PluginMeta;
+        if (!meta || typeof meta !== "object") return;
+
+        meta[definition.name] = {
+            folderName: plugin.source || plugin.filePath || `src/userplugins/${definition.name}`,
+            userPlugin: true
+        };
+    }
+
     function registerPluginDefinition(definition, plugin) {
         const manager = getPluginManager();
         if (!manager?.plugins) return false;
+        const meta = window.Vencord?.PluginMeta;
+        if (!meta || typeof meta !== "object") {
+            throw new Error("Equicord plugin metadata is unavailable. Reload the extension and Discord, then add this plugin again.");
+        }
 
         const previous = manager.plugins[definition.name];
         if (previous && previous !== definition && previous.__equicordUserPluginId !== plugin.id) {
@@ -647,6 +661,7 @@
         }
 
         manager.plugins[definition.name] = definition;
+        registerPluginMeta(definition, plugin);
         markPluginSettingsChanged(definition.name, plugin.enabled);
         return true;
     }
