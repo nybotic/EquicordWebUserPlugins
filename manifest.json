@@ -46,7 +46,8 @@
     {
       "resources": [
         "extension-chrome-src/dist/*",
-        "extension-chrome-src/vendor/*"
+        "extension-chrome-src/vendor/*",
+        "extension-chrome-src/vendor/babel/*"
       ],
       "matches": [
         "*://*.discord.com/*"

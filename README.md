@@ -16,8 +16,8 @@ Open Equicord settings, then go to the Plugins tab. The Custom User Plugins pane
 
 You can add plugins in either of these ways:
 
-- Paste a GitHub repo URL, `owner/repo`, raw GitHub `.js` URL, or direct `.js` URL.
-- Upload a local compiled `.js` / `.mjs` file, or upload a whole built plugin folder.
+- Paste a GitHub repo URL, `owner/repo`, raw GitHub `.js` / `.ts` / `.tsx` URL, or direct source URL.
+- Upload a local `.js` / `.mjs` / `.ts` / `.tsx` file, or upload a whole plugin folder.
 
 For GitHub repositories, the loader checks for compiled JavaScript files in this order:
 
@@ -29,7 +29,7 @@ For GitHub repositories, the loader checks for compiled JavaScript files in this
 - `plugin.js`
 - `userplugin.js`
 
-TypeScript-only repos need to be built first, or uploaded as compiled JavaScript.
+TypeScript and TSX source plugins are compiled in the browser with the bundled compiler. Plugins that depend on build-time assets or unusual bundler plugins may still need to be built first.
 
 Folder uploads are scanned for compiled JavaScript candidates like `dist/index.js`, `index.js`, `plugin.js`, and `userplugin.js`. If you select a folder containing multiple top-level plugin folders, each folder is scanned and installed separately when it contains a usable JavaScript plugin file.
 

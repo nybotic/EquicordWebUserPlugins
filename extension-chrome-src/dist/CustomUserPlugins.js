@@ -15,15 +15,37 @@
         "plugin.js",
         "userplugin.js"
     ];
+    const SOURCE_CANDIDATE_FILES = [
+        "src/index.tsx",
+        "src/index.ts",
+        "index.tsx",
+        "index.ts",
+        "plugin.tsx",
+        "plugin.ts",
+        "userplugin.tsx",
+        "userplugin.ts"
+    ];
     const IGNORED_PATH_PARTS = new Set(["node_modules", ".git", ".github", "test", "tests", "__tests__", "docs"]);
     const log = (...args) => console.log("%c Equicord %c UserPlugins ", "background:#a6d189;color:#000;font-weight:bold;border-radius:4px", "background:#d2acf5;color:#000;font-weight:bold;border-radius:4px", ...args);
     const warn = (...args) => console.warn("%c Equicord %c UserPlugins ", "background:#e5c890;color:#000;font-weight:bold;border-radius:4px", "background:#d2acf5;color:#000;font-weight:bold;border-radius:4px", ...args);
     const fail = (...args) => console.error("%c Equicord %c UserPlugins ", "background:#e78284;color:#000;font-weight:bold;border-radius:4px", "background:#d2acf5;color:#000;font-weight:bold;border-radius:4px", ...args);
 
     let dbPromise;
+    let extensionMeta;
+    let babelPromise;
     let plugins = [];
     const runtimes = new Map();
     const listeners = new Set();
+
+    const extensionMetaReady = new Promise(resolve => {
+        const onMessage = event => {
+            if (event.data?.type !== "vencord:meta") return;
+            extensionMeta = event.data.meta;
+            window.removeEventListener("message", onMessage);
+            resolve(extensionMeta);
+        };
+        window.addEventListener("message", onMessage);
+    });
 
     function openDb() {
         if (dbPromise) return dbPromise;
@@ -269,6 +291,37 @@
         return candidates[0] || null;
     }
 
+    function isUsableSourcePath(filePath) {
+        const normalized = filePath.replace(/\\/g, "/");
+        if (!/\.(tsx?|jsx?)$/i.test(normalized)) return false;
+        if (/(\.|-)d\.ts$/i.test(normalized)) return false;
+        const parts = normalized.split("/");
+        if (parts.some(part => IGNORED_PATH_PARTS.has(part))) return false;
+        if (/\.(config|test|spec)\.(tsx?|jsx?)$/i.test(normalized)) return false;
+        return true;
+    }
+
+    function scoreSourcePath(filePath) {
+        const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+        const fileName = normalized.split("/").pop() || "";
+        let score = 0;
+
+        if (SOURCE_CANDIDATE_FILES.includes(normalized)) score += 1000 - SOURCE_CANDIDATE_FILES.indexOf(normalized);
+        if (normalized.includes("/src/")) score += 120;
+        if (fileName === "index.tsx" || fileName === "index.ts") score += 180;
+        if (fileName === "plugin.tsx" || fileName === "plugin.ts") score += 160;
+        if (normalized.includes("plugin")) score += 60;
+        score -= normalized.split("/").length * 3;
+
+        return score;
+    }
+
+    function pickBestSourceFile(paths) {
+        const candidates = paths.filter(isUsableSourcePath);
+        candidates.sort((a, b) => scoreSourcePath(b) - scoreSourcePath(a));
+        return candidates[0] || null;
+    }
+
     async function getGithubDefaultBranch(owner, repo) {
         const response = await fetch(`https://api.github.com/repos/${owner}/${repo}`, { cache: "no-cache" });
         if (!response.ok) return null;
@@ -319,23 +372,235 @@
                     }
                 }
 
-                if (paths.some(path => /\.(tsx?|jsx?)$/i.test(path)) && !paths.some(isUsableJavaScriptPath)) {
-                    throw new Error("This GitHub repo only has source files, not a built plugin. Build it first and upload/paste the compiled JavaScript output.");
+                const source = pickBestSourceFile(paths);
+                if (source) {
+                    const candidate = await fetchGithubCandidate(repo.owner, repo.repo, branch, source);
+                    if (candidate) {
+                        candidate.css = await fetchGithubCssForCandidate(repo.owner, repo.repo, branch, source, candidate.code, paths);
+                        candidate.sourceKind = "source";
+                        return candidate;
+                    }
                 }
             } catch (error) {
                 warn("GitHub tree fallback failed", error);
-                if (String(error?.message || error).includes("only has source files")) throw error;
             }
         }
 
-        throw new Error("Could not find a compiled JavaScript plugin file. Add dist/index.js, index.js, plugin.js, userplugin.js, or upload a built plugin folder.");
+        throw new Error("Could not find a plugin entry file. Add dist/index.js, index.js, plugin.js, userplugin.js, index.tsx, index.ts, or upload a plugin folder.");
     }
 
-    function transformSource(source) {
-        let code = source.replace(/^\s*import\s+[^;]+;?\s*$/gm, "");
-        code = code.replace(/\bexport\s+default\s+/g, "module.exports = ");
-        code = code.replace(/\bexport\s+\{[^}]+\};?\s*$/gm, "");
-        return code;
+    function isSourceFile(filePath = "") {
+        return /\.(tsx?|jsx?)$/i.test(filePath);
+    }
+
+    async function loadBabel() {
+        if (window.Babel?.transform) return window.Babel;
+        if (babelPromise) return babelPromise;
+
+        babelPromise = (async () => {
+            const meta = extensionMeta || await extensionMetaReady;
+            const baseUrl = meta?.EXTENSION_BASE_URL || "";
+            if (!baseUrl) throw new Error("Could not resolve extension URL for the source compiler.");
+
+            await new Promise((resolve, reject) => {
+                const script = document.createElement("script");
+                script.src = `${baseUrl}vendor/babel/babel.min.js`;
+                script.onload = resolve;
+                script.onerror = () => reject(new Error("Could not load the bundled TSX compiler."));
+                document.documentElement.append(script);
+            });
+
+            if (!window.Babel?.transform) throw new Error("The bundled TSX compiler did not initialize.");
+            return window.Babel;
+        })();
+
+        return babelPromise;
+    }
+
+    function parseImportSpecifiers(specifiers, moduleName) {
+        const statements = [];
+        let rest = specifiers.trim();
+        if (rest.startsWith("type ")) return statements;
+        const nsMatch = rest.match(/^\*\s+as\s+([\w$]+)$/);
+        if (nsMatch) return [`const ${nsMatch[1]} = __equpImport(${JSON.stringify(moduleName)});`];
+
+        const cleanNamedSpecifiers = value => {
+            const body = value.replace(/^\{/, "").replace(/\}$/, "");
+            const names = body.split(",")
+                .map(part => part.trim())
+                .filter(part => part && !part.startsWith("type "))
+                .map(part => part.replace(/\bas\s+([\w$]+)/g, ": $1"));
+            return names.length ? `{ ${names.join(", ")} }` : "";
+        };
+
+        if (rest.startsWith("{")) {
+            rest = cleanNamedSpecifiers(rest);
+            if (rest) statements.push(`const ${rest} = __equpImport(${JSON.stringify(moduleName)});`);
+            return statements;
+        }
+
+        const commaIndex = rest.indexOf(",");
+        if (commaIndex === -1) {
+            statements.push(`const ${rest} = __equpImport(${JSON.stringify(moduleName)}).default;`);
+            return statements;
+        }
+
+        const defaultName = rest.slice(0, commaIndex).trim();
+        rest = rest.slice(commaIndex + 1).trim();
+        if (defaultName) statements.push(`const ${defaultName} = __equpImport(${JSON.stringify(moduleName)}).default;`);
+        rest = rest.startsWith("{") ? cleanNamedSpecifiers(rest) : rest;
+        if (rest) statements.push(`const ${rest} = __equpImport(${JSON.stringify(moduleName)});`);
+        return statements;
+    }
+
+    function stripImportsAndCreatePrelude(source) {
+        const prelude = [];
+        const code = source.replace(/^\s*import\s+(.+?)\s+from\s+["']([^"']+)["'];?\s*$/gm, (full, specifiers, moduleName) => {
+            if (/\.css(?:\?|$)/i.test(moduleName)) return "";
+            prelude.push(...parseImportSpecifiers(specifiers, moduleName));
+            return "";
+        }).replace(/^\s*import\s*["'][^"']+["'];?\s*$/gm, "");
+
+        return `${prelude.join("\n")}\n${code}`;
+    }
+
+    async function transformSource(source, filePath = "") {
+        if (!isSourceFile(filePath)) {
+            let code = source.replace(/^\s*import\s+[^;]+;?\s*$/gm, "");
+            code = code.replace(/\bexport\s+default\s+/g, "module.exports = ");
+            code = code.replace(/\bexport\s+\{[^}]+\};?\s*$/gm, "");
+            return code;
+        }
+
+        const Babel = await loadBabel();
+        const withPrelude = stripImportsAndCreatePrelude(source);
+        const result = Babel.transform(withPrelude, {
+            filename: filePath || "plugin.tsx",
+            sourceType: "module",
+            presets: [
+                ["typescript", { allExtensions: true, isTSX: /\.tsx$/i.test(filePath) }],
+                ["react", { runtime: "classic" }]
+            ],
+            plugins: ["transform-modules-commonjs"],
+            compact: false,
+            comments: false
+        });
+
+        return result.code;
+    }
+
+    function createPluginSettings(definition) {
+        const settings = {
+            def: definition,
+            pluginName: "",
+            get store() {
+                const name = settings.pluginName || "__customUserPlugin";
+                const root = window.Vencord?.Settings?.plugins || window.Vencord?.PlainSettings?.plugins || {};
+                root[name] ??= {};
+                for (const [key, value] of Object.entries(definition || {})) {
+                    if (!Object.hasOwn(root[name], key) && Object.hasOwn(value, "default")) root[name][key] = value.default;
+                }
+                return root[name];
+            },
+            get plain() {
+                return settings.store;
+            },
+            use(keys) {
+                const React = window.Vencord?.Webpack?.Common?.React;
+                const [, rerender] = React?.useState ? React.useState(0) : [0, () => undefined];
+                React?.useEffect?.(() => undefined, []);
+                const store = settings.store;
+                if (!Array.isArray(keys)) return store;
+                return Object.fromEntries(keys.map(key => [key, store[key]]));
+            },
+            withPrivateSettings() {
+                return settings;
+            }
+        };
+        return settings;
+    }
+
+    function makeImportResolver() {
+        const common = window.Vencord?.Webpack?.Common || {};
+        const webpack = window.Vencord?.Webpack || {};
+        const components = window.Vencord?.Components || {};
+        const api = window.Vencord?.Api || {};
+        const modal = {
+            ...(components || {}),
+            openModal: components.openModal || common.openModal,
+            openModalLazy: components.openModalLazy || common.openModalLazy,
+            closeModal: components.closeModal || common.closeModal,
+            ModalRoot: components.ModalRoot,
+            ModalHeader: components.ModalHeader,
+            ModalContent: components.ModalContent,
+            ModalFooter: components.ModalFooter,
+            ModalCloseButton: components.ModalCloseButton,
+            ModalSize: components.ModalSize || { SMALL: "small", MEDIUM: "medium", LARGE: "large", DYNAMIC: "dynamic" }
+        };
+        const optionType = {
+            STRING: 0,
+            NUMBER: 1,
+            BIGINT: 2,
+            BOOLEAN: 3,
+            SELECT: 4,
+            SLIDER: 5,
+            COMPONENT: 6,
+            CUSTOM: 7
+        };
+        const modules = {
+            "@webpack": webpack,
+            "@webpack/common": common,
+            "@components/Button": { Button: common.Button || components.Button },
+            "@api/Settings": { definePluginSettings: api.Settings?.definePluginSettings || createPluginSettings },
+            "@utils/types": { default: value => value, OptionType: api.Settings?.OptionType || optionType },
+            "@utils/modal": modal,
+            "@api/UserArea": {
+                UserAreaButton: api.UserArea?.UserAreaButton || common.Button,
+                UserAreaRenderProps: Object
+            },
+            "@api/Styles": api.Styles || {},
+            "@api/Commands": api.Commands || {},
+            "@api/ContextMenu": api.ContextMenu || {},
+            "@utils/discord": window.Vencord?.Util || {},
+            "@utils/misc": window.Vencord?.Util || {},
+            "@utils/react": { React: common.React, ...common },
+            "@utils/web": window.Vencord?.Util || {}
+        };
+
+        return moduleName => {
+            if (modules[moduleName]) return modules[moduleName];
+            if (moduleName.startsWith("@webpack/")) return webpack;
+            if (moduleName.startsWith("@components/")) return { ...components, ...common };
+            if (moduleName.startsWith("@api/")) return api[moduleName.slice(5)] || {};
+            if (moduleName.startsWith("@utils/")) return window.Vencord?.Util || {};
+            warn(`Using empty shim for source import ${moduleName}`);
+            return {};
+        };
+    }
+
+    function getPluginManager() {
+        return window.Vencord?.Api?.PluginManager || window.Vencord?.Plugins || null;
+    }
+
+    function shouldUsePluginManager(definition) {
+        const manager = getPluginManager();
+        return Boolean(
+            manager?.plugins &&
+            typeof manager.startPlugin === "function" &&
+            typeof manager.stopPlugin === "function" &&
+            (
+                definition.userAreaButton ||
+                definition.settings ||
+                definition.commands ||
+                definition.contextMenus ||
+                definition.chatBarButton ||
+                definition.headerBarButton ||
+                definition.messagePopoverButton ||
+                definition.renderMemberListDecorator ||
+                definition.renderProfileSection ||
+                definition.renderProfileCollection
+            )
+        );
     }
 
     function makeSandbox(plugin, registration) {
@@ -388,7 +653,8 @@
         const module = { exports: {} };
         const exports = module.exports;
         const api = makeSandbox(plugin, registration);
-        const code = transformSource(plugin.code || "");
+        const code = await transformSource(plugin.code || "", plugin.filePath || "");
+        const importResolver = makeImportResolver();
         const cssNodes = [];
 
         for (const css of plugin.css || []) {
@@ -419,9 +685,10 @@
             "EquicordUserPlugins",
             "definePlugin",
             "registerPlugin",
+            "__equpImport",
             `"use strict";\n${code}\n//# sourceURL=equicord-user-plugin-${plugin.id}.js`
         );
-            runner(module, exports, api, window.Vencord, window.VencordNative, window.EquicordUserPlugins, value => value, api.register);
+            runner(module, exports, api, window.Vencord, window.VencordNative, window.EquicordUserPlugins, value => value, api.register, importResolver);
         } finally {
             if (previousGlobal) {
                 window.EquicordUserPlugins = previousGlobal;
@@ -432,6 +699,9 @@
         const normalized = typeof definition === "function" ? { name: plugin.name, start: definition } : definition;
         if (!normalized || typeof normalized !== "object") {
             throw new Error("Plugin did not export an object or call EquicordUserPlugins.register(...).");
+        }
+        if (normalized.settings && typeof normalized.settings === "object" && "pluginName" in normalized.settings) {
+            normalized.settings.pluginName = normalized.name || plugin.name;
         }
 
         const context = {
@@ -444,12 +714,21 @@
             }
         };
 
-        if (typeof normalized.start === "function") {
+        let managerStop = null;
+        if (shouldUsePluginManager(normalized)) {
+            const manager = getPluginManager();
+            const settings = window.Vencord?.Settings?.plugins || window.Vencord?.PlainSettings?.plugins;
+            if (settings) settings[normalized.name] = { ...(settings[normalized.name] || {}), enabled: true };
+            manager.plugins[normalized.name] = normalized;
+            const result = manager.startPlugin(normalized);
+            if (result === false) throw new Error(`Equicord PluginManager could not start ${normalized.name}.`);
+            managerStop = () => manager.stopPlugin(normalized);
+        } else if (typeof normalized.start === "function") {
             await normalized.start.call(normalized, context);
         }
 
         runtimes.set(plugin.id, {
-            stop: typeof normalized.stop === "function" ? () => normalized.stop.call(normalized, context) : null,
+            stop: managerStop || (typeof normalized.stop === "function" ? () => normalized.stop.call(normalized, context) : null),
             cleanup,
             definition: normalized
         });
@@ -496,7 +775,7 @@
 
         let resolved;
         let sourceType;
-        if (/^https?:\/\/.+\.m?js(?:[?#].*)?$/i.test(trimmed) || /raw\.githubusercontent\.com/.test(trimmed) || /github\.com\/.+\/blob\//.test(trimmed)) {
+        if (/^https?:\/\/.+\.(m?js|tsx?|jsx?)(?:[?#].*)?$/i.test(trimmed) || /raw\.githubusercontent\.com/.test(trimmed) || /github\.com\/.+\/blob\//.test(trimmed)) {
             const url = normalizeRawUrl(trimmed);
             resolved = { url, code: await fetchText(url), filePath: new URL(url).pathname.split("/").pop() };
             sourceType = "url";
@@ -527,7 +806,7 @@
 
     async function addFromFile(file) {
         if (!file) return null;
-        if (!/\.m?js$/i.test(file.name)) throw new Error("Upload a compiled .js or .mjs plugin file.");
+        if (!/\.(m?js|tsx?|jsx?)$/i.test(file.name)) throw new Error("Upload a .js, .mjs, .ts, .tsx, or .jsx plugin file.");
         const plugin = {
             id: idFrom(file.name),
             name: guessName(file.name),
@@ -568,9 +847,13 @@
     function pickBestFolderFile(files) {
         const candidates = files
             .map(file => ({ file, path: file.webkitRelativePath || file.name }))
-            .filter(item => isUsableJavaScriptPath(item.path));
+            .filter(item => isUsableJavaScriptPath(item.path) || isUsableSourcePath(item.path));
 
-        candidates.sort((a, b) => scoreCandidatePath(b.path) - scoreCandidatePath(a.path));
+        candidates.sort((a, b) => {
+            const scoreA = isUsableJavaScriptPath(a.path) ? scoreCandidatePath(a.path) + 1000 : scoreSourcePath(a.path);
+            const scoreB = isUsableJavaScriptPath(b.path) ? scoreCandidatePath(b.path) + 1000 : scoreSourcePath(b.path);
+            return scoreB - scoreA;
+        });
         return candidates[0] || null;
     }
 
@@ -635,9 +918,9 @@
 
         if (!added.length) {
             if (sourceOnly.length) {
-                throw new Error(`The selected folder only has source files, not a built plugin: ${sourceOnly.join(", ")}. Build it first, then upload the compiled JavaScript output.`);
+                throw new Error(`No usable plugin entry file found in: ${sourceOnly.join(", ")}. Add index.tsx, index.ts, index.js, plugin.tsx, or plugin.js.`);
             }
-            throw new Error(`No compiled JavaScript plugin files found${skipped.length ? ` in: ${skipped.join(", ")}` : ""}. Build TypeScript plugins first, then upload the folder again.`);
+            throw new Error(`No plugin entry files found${skipped.length ? ` in: ${skipped.join(", ")}` : ""}. Add index.tsx, index.ts, index.js, plugin.tsx, or plugin.js.`);
         }
 
         return added;
@@ -799,7 +1082,7 @@
             className: "equp-input",
             placeholder: "Paste GitHub repo, owner/repo, raw .js URL, or direct .js URL"
         });
-        const fileInput = el("input", { className: "equp-file", type: "file", accept: ".js,.mjs" });
+        const fileInput = el("input", { className: "equp-file", type: "file", accept: ".js,.mjs,.ts,.tsx,.jsx" });
         const folderInput = el("input", { className: "equp-file", type: "file", webkitdirectory: "", directory: "", multiple: "" });
         const list = el("div", { className: "equp-list" });
 
@@ -903,7 +1186,7 @@
                 fileInput,
                 folderInput
             ]),
-            el("p", { className: "equp-help", text: "Paste a plugin GitHub repo or JavaScript URL here, or upload a built plugin folder. TypeScript source-only plugins must be built first." }),
+            el("p", { className: "equp-help", text: "Paste a plugin GitHub repo, source file, JavaScript URL, or upload a plugin folder. TypeScript and TSX source files are compiled in the browser." }),
             status,
             list
         );
