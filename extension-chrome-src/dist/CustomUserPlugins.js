@@ -776,6 +776,8 @@
             cleanup,
             definition: normalized
         });
+
+        return normalized;
     }
 
     async function refreshPlugin(plugin) {
@@ -796,13 +798,18 @@
     async function applyPlugin(plugin, { persist = true } = {}) {
         let next = { ...plugin, error: null };
         try {
-            if (next.enabled) await startPlugin(next);
+            let normalized;
+            if (next.enabled) {
+                normalized = await startPlugin(next);
+            }
             else {
                 await stopRuntime(next.id);
-                const normalized = await evaluatePlugin(next, []);
+                normalized = await evaluatePlugin(next, []);
                 registerPluginDefinition(normalized, next);
                 markPluginSettingsChanged(normalized.name, false);
             }
+            if (normalized?.name) next.name = normalized.name;
+            if (normalized?.description) next.description = normalized.description;
             next.lastLoadedAt = next.enabled ? Date.now() : next.lastLoadedAt;
         } catch (error) {
             next.error = error?.message || String(error);
@@ -849,8 +856,7 @@
             error: null
         };
 
-        await applyPlugin(plugin);
-        return plugin;
+        return await applyPlugin(plugin);
     }
 
     async function addFromFile(file) {
@@ -871,8 +877,7 @@
             lastLoadedAt: null,
             error: null
         };
-        await applyPlugin(plugin);
-        return plugin;
+        return await applyPlugin(plugin);
     }
 
     function groupFolderFiles(files) {
@@ -961,8 +966,7 @@
                 lastLoadedAt: null,
                 error: null
             };
-            await applyPlugin(plugin);
-            added.push(plugin);
+            added.push(await applyPlugin(plugin));
         }
 
         if (!added.length) {

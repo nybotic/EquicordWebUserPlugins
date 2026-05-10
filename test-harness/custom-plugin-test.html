@@ -1,0 +1,158 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Equicord User Plugin Loader Test</title>
+<div id="app-mount">
+    <section class="vc-plugins-grid"></section>
+</div>
+<pre id="result">Loading...</pre>
+<script>
+const result = document.getElementById("result");
+const events = [];
+const settingsPlain = { plugins: {} };
+const settingsProxy = new Proxy(settingsPlain, {
+    get(target, key) {
+        return target[key];
+    }
+});
+
+function log(message, detail) {
+    events.push({ message, detail });
+    result.textContent = JSON.stringify(events, null, 2);
+}
+
+window.addEventListener("message", event => {
+    if (event.data?.type !== "equicord:get-meta") return;
+    window.postMessage({
+        type: "vencord:meta",
+        meta: {
+            EXTENSION_VERSION: "test",
+            EXTENSION_BASE_URL: new URL("../extension-chrome-src/", location.href).href,
+            RENDERER_CSS_URL: new URL("../extension-chrome-src/dist/Equicord.css", location.href).href
+        }
+    });
+});
+
+const fakeReact = {
+    createElement(type, props, ...children) {
+        return { type, props: { ...(props || {}), children } };
+    },
+    Fragment: Symbol.for("react.fragment"),
+    useState(value) {
+        return [value, () => undefined];
+    },
+    useEffect() {},
+    useMemo(callback) {
+        return callback();
+    },
+    useCallback(callback) {
+        return callback;
+    },
+    useRef(value) {
+        return { current: value };
+    }
+};
+
+const pluginManager = {
+    plugins: {},
+    startPlugin(plugin) {
+        plugin.startedByHarness = true;
+        plugin.started = true;
+        log("startPlugin", plugin.name);
+        return true;
+    },
+    stopPlugin(plugin) {
+        plugin.stoppedByHarness = true;
+        plugin.started = false;
+        log("stopPlugin", plugin.name);
+        return true;
+    }
+};
+
+window.Vencord = {
+    Api: {
+        PluginManager: pluginManager,
+        Settings: {
+            definePluginSettings(definition) {
+                return {
+                    def: definition,
+                    pluginName: "",
+                    get store() {
+                        settingsPlain.plugins[this.pluginName] ??= {};
+                        return settingsPlain.plugins[this.pluginName];
+                    },
+                    get plain() {
+                        return this.store;
+                    },
+                    use() {
+                        return this.store;
+                    },
+                    withPrivateSettings() {
+                        return this;
+                    }
+                };
+            },
+            OptionType: { STRING: 0, NUMBER: 1, BIGINT: 2, BOOLEAN: 3, SELECT: 4, SLIDER: 5, COMPONENT: 6 }
+        },
+        UserArea: {
+            UserAreaButton(props) {
+                return fakeReact.createElement("button", props);
+            }
+        }
+    },
+    Components: {
+        Button(props) {
+            return fakeReact.createElement("button", props);
+        },
+        ModalRoot: "ModalRoot",
+        ModalHeader: "ModalHeader",
+        ModalContent: "ModalContent",
+        ModalFooter: "ModalFooter",
+        ModalCloseButton: "ModalCloseButton",
+        ModalSize: { SMALL: "small", MEDIUM: "medium", LARGE: "large", DYNAMIC: "dynamic" },
+        openModal() {}
+    },
+    Webpack: {
+        findByPropsLazy() {
+            return {};
+        },
+        Common: {
+            React: fakeReact,
+            useState: fakeReact.useState,
+            Forms: {},
+            TextInput: "TextInput",
+            UserStore: { getCurrentUser: () => ({ username: "Tester" }) },
+            Toasts: { Type: { MESSAGE: "message" }, genId: () => "toast", show: () => undefined },
+            showToast: () => undefined,
+            Button(props) {
+                return fakeReact.createElement("button", props);
+            }
+        }
+    },
+    Plugins: pluginManager,
+    Settings: settingsProxy,
+    PlainSettings: settingsPlain,
+    Util: {}
+};
+window.VencordNative = {};
+
+window.addEventListener("error", event => log("error", event.message));
+window.addEventListener("unhandledrejection", event => log("unhandledrejection", String(event.reason?.message || event.reason)));
+</script>
+<script src="../extension-chrome-src/dist/CustomUserPlugins.js?harness=3"></script>
+<script>
+(async () => {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const added = await window.EquicordUserPluginManager.addFromGithub("https://github.com/nybotic/AccountSwitcher");
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const registered = window.Vencord.Plugins.plugins.AccountSwitcher;
+    log("added", {
+        customName: added.name,
+        customError: added.error,
+        registered: Boolean(registered),
+        registeredName: registered?.name,
+        settingsEnabled: window.Vencord.PlainSettings.plugins.AccountSwitcher?.enabled,
+        started: registered?.startedByHarness === true,
+        hasUserAreaButton: Boolean(registered?.userAreaButton)
+    });
+})();
+</script>
