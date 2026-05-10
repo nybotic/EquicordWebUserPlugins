@@ -45,6 +45,7 @@
             resolve(extensionMeta);
         };
         window.addEventListener("message", onMessage);
+        window.postMessage({ type: "equicord:get-meta" });
     });
 
     function openDb() {

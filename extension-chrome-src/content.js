@@ -10,20 +10,31 @@ function getExtensionBasePath() {
     return contentScript.slice(0, - "content.js".length);
 }
 
+function getExtensionMeta() {
+    const manifest = browser.runtime.getManifest();
+    const basePath = getExtensionBasePath();
+
+    return {
+        EXTENSION_VERSION: manifest.version,
+        EXTENSION_BASE_URL: browser.runtime.getURL(basePath),
+        RENDERER_CSS_URL: browser.runtime.getURL(`${basePath}dist/Equicord.css`),
+    };
+}
+
+function postExtensionMeta() {
+    window.postMessage({
+        type: "vencord:meta",
+        meta: getExtensionMeta()
+    });
+}
+
+window.addEventListener("message", event => {
+    if (event.data?.type !== "equicord:get-meta") return;
+    postExtensionMeta();
+});
+
 document.addEventListener(
     "DOMContentLoaded",
-    () => {
-        const manifest = browser.runtime.getManifest();
-        const basePath = getExtensionBasePath();
-
-        window.postMessage({
-            type: "vencord:meta",
-            meta: {
-                EXTENSION_VERSION: manifest.version,
-                EXTENSION_BASE_URL: browser.runtime.getURL(basePath),
-                RENDERER_CSS_URL: browser.runtime.getURL(`${basePath}dist/Equicord.css`),
-            }
-        });
-    },
+    postExtensionMeta,
     { once: true }
 );
